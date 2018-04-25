@@ -1,0 +1,230 @@
+---
+title: "Final project R"
+author: "Ahmed Tarek Sayed"
+date: "February 12, 2018"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+```
+
+##importing the datasets
+```{r}
+tmdb_movies_metadata <- read_csv("E:/Academic/ITI/R/Evaluation Project/R for Data Science course evaluation/tmdb_movies_metadata.csv")
+
+tmdb_cast_crew <- read_csv("E:/Academic/ITI/R/Evaluation Project/R for Data Science course evaluation/tmdb_cast_crew.csv")
+```
+
+### Is there a relationship between movie the number of budget and the movie rating?
+
+```{r}
+tmdb_movies_metadata %>% select(budget, vote_average)%>% summary()
+```
+the mean is far away from median indicating the variable is right skewed, indicating the presence of extremes or ouytliers in the budget variable
+however the voting is balanced.
+
+```{r}
+tmdb_movies_metadata %>% ggplot() + geom_freqpoly(mapping = aes(x=budget ))
+```
+there is clearly very large number of movies with budget = 0!!
+Iwill devide the budget into 20 equal parts to try to see if the 0 budget movies are an entry (null) or not.
+```{r}
+tmdb_movies_metadata %>% mutate(percentile = ntile(budget,20)) %>% select(percentile, budget,vote_average,vote_count) %>% group_by(percentile) %>% summarise(n(), mean(budget),min(budget),median(budget), max(budget), mean(vote_average), mean(vote_count) )
+```
+
+I can see normal equal average voting rate in all 20 parts regardless of the 0 budget, so I will deal with them as an entry error.
+
+all 20 parts are almost normally dist with mean = media except in the 5th which is the break point between the 0 budget(entery error) and the non 0, so i will try to get the best number that separate the real data from the entery error 
+```{r}
+tmdb_movies_metadata %>%filter(budget < 100000) %>% mutate(percentile = ntile(budget,30)) %>% select(percentile, budget,vote_average,vote_count) %>% group_by(percentile) %>% summarise(n(), mean(budget),min(budget),median(budget), max(budget) )
+```
+
+Now i will see the movies with budget between 1 and 22000 to see if they make sense or not
+```{r}
+tmdb_movies_metadata %>%filter(budget %in% (1:50000)) %>% select(title, release_date, budget, vote_average, vote_count, popularity, runtime) %>%  arrange(budget)
+```
+
+Can old movies budget be that small?
+I have checked the IMDP data base to see if even the old movies <1940 budget can make sense with very low numbers but my search revealed error with these entery 
+examples of errors compared to imdb:-
+http://www.imdb.com/title/tt0022879/ dataset:4 imdb:800K
+http://www.imdb.com/title/tt1714210/ dataset:8000 imdb:120K
+
+Idecided to take >8000 as the limit of real non outliers data
+```{r}
+filtered_movies <- tmdb_movies_metadata %>% filter(budget >8000)
+```
+
+Trying to visualise the relation bettween voting average and budget.
+
+```{r}
+filtered_movies %>% ggplot(aes(x=budget, y=vote_average)) + geom_point() + geom_smooth()
+```
+It seems that there is no correlation.
+My interpertation : we have 2 problems :-
+1- we cannot compare budget from diffrent years to each other
+2- voting rate can be really missleading specially with with low voting count
+
+I will extract the year of release from date
+```{r}
+filtered_movies <- filtered_movies %>% mutate(release_year = format(release_date,"%Y"))
+
+```
+
+```{r}
+filtered_movies %>% ggplot(aes(x=vote_average, y=budget)) + geom_point(aes(color = release_year),show.legend = F) + geom_smooth()
+```
+I have downloaded cpi dataset from  https://datahub.io/core/cpi-us#data and inner joined it to movie dataset to be able to adjust budget per year
+```{r}
+cpiai_csv <- read_csv("E:/Academic/ITI/R/Evaluation Project/R for Data Science course evaluation/cpiai_csv.csv", 
+    col_types = cols(Date = col_date(format = "%d/%m/%Y")))
+
+cpi <- cpiai_csv %>% transmute(release_year = format(Date,"%Y"), cpi= Index) 
+
+cpi <- cpi %>%  group_by(release_year) %>% summarise( cpi = mean(cpi, na.rm = T))
+
+indexed_movies <- cpi %>% select(release_year, cpi) %>% right_join(filtered_movies, by = "release_year")
+```
+I have got the mean cpi for the year and then right joind the cpi to the movie dataset with the year 
+```{r}
+indexed_movies <- indexed_movies %>% mutate( indexed_budget = budget/cpi)
+```
+I have created a new variable called the indexed_budget revealing the budget in relation to yearly index
+
+Now lets examine the relation between the total_votes(count*average) againist the indexed budget
+
+```{r}
+indexed_movies %>% mutate(total_votes = vote_count*vote_average) %>%  ggplot(aes(x=total_votes, y=indexed_budget)) + geom_point(mapping = aes(color = release_year), show.legend = F) + geom_smooth() + ylim(NA,2000000)
+```
+there is a moderate correlation between the two but from the colors we can see that there is a clear groupping by the year.
+the voting count is increasing throw the years making this correlation noised by the effect of count per time
+
+You may notice a very clear outlier with indexed budget >4000000 (very extreme).
+
+```{r}
+indexed_movies %>% filter(indexed_budget > 4000000)
+```
+after checking the movie at imdb 
+http://www.imdb.com/title/tt0017136/ dataset:92m imdb:6m (clearly an error)
+
+###What are the genres that have the highest average rating?
+
+First of all i need to know the max number of genres per movie 
+```{r}
+indexed_movies %>% transmute(count_gen = str_count(genres, fixed("|")) +1) %>% summarise(max(count_gen, na.rm = T))
+```
+Then I am going to separate these words
+```{r}
+spr_gen_movies <- indexed_movies %>% separate(genres, into = paste("gen", 1:7, sep = "_"))
+```
+Now I amgoing to gather them and filter all the nulls to make a group function
+
+```{r}
+gen_movies <- spr_gen_movies %>%  gather(num_range("gen_", 1:7), key = "gen_no", value = "gen") %>% filter(!is.na(gen))
+```
+
+Now lets play :D 
+```{r}
+gen_movies <- gen_movies %>% mutate(total_votes = vote_count*vote_average)
+gen_movies %>% group_by(gen) %>% summarise(avg_rate = mean(vote_average), avg_total_votes = mean(total_votes)) %>% arrange(desc(avg_rate)) 
+```
+it looks like war then history then forign movies is the one with highest avg_rate
+but why do I feel like it is not the truth, You dont see alot of fans of war or forign movies :D 
+but lets see the total_votes(count*average) as it is a more accurate indicator.
+
+```{r}
+gen_movies <- gen_movies %>% mutate(total_votes = vote_count*vote_average)
+gen_movies %>% group_by(gen) %>% summarise(avg_rate = mean(vote_average), avg_total_votes = mean(total_votes)) %>% arrange(desc(avg_total_votes)) 
+```
+Now the results are more logical, the top 4 genres are fiction, scince, adventure then fantasy
+looks like the next part of the avenger series going to be a hit :D
+
+###What are the plot keywords that have the highest average rating?
+
+first I need to count the maximum number of keywords in single row 
+```{r}
+indexed_movies %>% transmute(count_key = str_count(keywords, fixed("|")) +1) %>% summarise(max(count_key, na.rm = T))
+```
+
+Now I am going separate the column into 97 column(max number of keywords per row)
+```{r}
+spr_key_movies <- indexed_movies %>% separate(keywords, into = paste("key", 1:97, sep = "_"))
+```
+ Then I am going to gather al columns in on column by repeating records and removing the nulls to be able to make group function 
+```{r}
+key_movies <- spr_key_movies %>%  gather(num_range("key_", 1:97), key = "key_no", value = "key") %>% filter(!is.na(key))
+```
+
+I have made groupping by the keywords and summarised the mean of the avg rating and also my total_vote(calculated) 
+```{r}
+key_movies <- key_movies %>% mutate(total_votes = vote_count*vote_average)
+
+key_movies %>% group_by(key) %>% summarise(avg_rate = mean(vote_average), avg_total_votes = mean(total_votes)) %>% arrange(desc(avg_rate)) 
+
+key_movies %>% group_by(key) %>% summarise(avg_rate = mean(vote_average), avg_total_votes = mean(total_votes)) %>% arrange(desc(avg_total_votes))
+```
+Using the vote_avg shows that  conservatory, heirloom then kamikaze are the key words with the highst rate
+
+##Who are the highly rated directors? Who are the highly rated actors?
+In order to see the highly rated director I need to join the 2 tables of metadata and crew
+and why dont we also calculate the (vote_count * vote_average) to see which KPI is more accurate
+
+```{r}
+full_movies <- left_join(indexed_movies, tmdb_cast_crew, by = "movie_id")
+full_movies <- full_movies %>% mutate(total_votes = vote_count*vote_average)
+```
+now lets see the director with the highest rating averrage
+
+```{r}
+full_movies %>% group_by(director) %>% summarise(sum_vote = sum(vote_average), sum_total = sum(total_votes)) %>%  arrange(desc(sum_vote))
+
+full_movies %>% group_by(director) %>% summarise(sum_vote = sum(vote_average), sum_total = sum(total_votes)) %>%  arrange(desc(sum_total))
+```
+I have arranged the list both by sum of vote average (using the mean give very poor accuracy) and sum total_votes.
+The total votes KPI shows to be more accurate than vote averrage when compared to imdb(one can know which is better just by seeing Christopher Nolan at the top :D)
+Refrence : http://www.imdb.com/list/ls069174126/
+
+1regarding the best actor:-
+I have gathered all the acttors in one value column 'actor' and removed any null columns 
+```{r}
+actor_movie <- full_movies %>%
+    gather(key = actor_no, value = actor, starts_with('actor'), na.rm = T)
+```
+
+now lets see using our KPIs
+```{r}
+actor_movie %>% group_by(actor) %>% summarise(sum_vote = sum(vote_average), sum_total = sum(total_votes)) %>%  arrange(desc(sum_vote))
+
+actor_movie %>% group_by(actor) %>% summarise(mean_vote = mean(vote_average), sum_total = sum(total_votes)) %>%  arrange(desc(sum_total))
+```
+
+well now both give moderate reults now(I think it is up to ones taste now :D)
+
+##Who are the most profitable directors? Who are the most profitable actors?
+In order to know profit we need to calc it (profit = revenue - cost(budget)) then I am going to devide by the (consumer price index) to be able to compare diffrent times
+
+```{r}
+full_movies %>% mutate(profit = revenue - budget, indexed_profit = profit/cpi) %>% group_by(director) %>% summarise(sum_profit = sum(profit), sum_indexed_profit = sum(indexed_profit)) %>% arrange(desc(sum_profit)) 
+
+full_movies %>% mutate(profit = revenue - budget, indexed_profit = profit/cpi) %>% group_by(director) %>% summarise(sum_profit = sum(profit), sum_indexed_profit = sum(indexed_profit)) %>% arrange(desc(sum_indexed_profit)) 
+```
+
+Well without putting out the inflation the most profitable directors are steven spilberg, peter jackson, james cameron
+
+but after putting out inflation() the list changes a little as directors who made old profitable movies are given a higher weight
+
+Regarding actors
+```{r}
+actor_movie %>% mutate(profit = revenue - budget, indexed_profit = profit/cpi) %>% group_by(actor) %>% summarise(sum_profit = sum(profit), sum_indexed_profit = sum(indexed_profit, na.rm = T)) %>% arrange(desc(sum_profit)) 
+
+actor_movie %>% mutate(profit = revenue - budget, indexed_profit = profit/cpi) %>% group_by(actor) %>% summarise(sum_profit = sum(profit), sum_indexed_profit = sum(indexed_profit,na.rm = T)) %>% arrange(desc(sum_indexed_profit)) 
+```
+also the first list shows Robert downey jr , tom cruise, tom hanks
+
+but using the cpi we can reveal old actors who were a hit in there times  such as Vivien Leigh
+
+
